@@ -1,0 +1,14 @@
+# MeshSExcel 设计与协议说明
+
+本目录收录了该项目的核心接口与数据模型设计。
+
+- `openapi.yaml`：本地节点 REST API 草案
+- `block.proto`：节点间 P2P 与 block 传输协议
+- `sqlite_schema.sql`：轻量桌面数据库结构
+
+相关设计思想：
+
+- Block 负责审计和恢复
+- Yjs 或 Automerge 负责实时协同状态
+- RocksDB/SQLite 负责本地存档
+- libp2p / gossipsub 负责局域网广播

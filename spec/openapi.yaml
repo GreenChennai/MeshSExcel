@@ -1,0 +1,188 @@
+# MeshSExcel 参考轮子与开源项目清单
+
+下面的开源项目是这个方向的优质参考，适合快速开发和工程落地。
+
+## 1. P2P / 网络
+
+### libp2p
+
+- 主页：https://libp2p.io/
+- 用途：局域网内发现、连接、消息广播、peer management
+- 适配建议：Rust / Go / JS 都有成熟生态
+- 价值：适合做 P2P 复制、发现、消息传播与中继
+
+### gossipsub
+
+- 论文 / 设计：libp2p pubsub
+- 用途：高效广播变更事件
+- 适配建议：在节点内做 block / sync 消息传播
+
+## 2. 实时协同 / CRDT
+
+### Yjs
+
+- 主页：https://github.com/yjs/yjs
+- 用途：实时协同编辑、状态同步、本地离线编辑合并
+- 价值：适合作为表格编辑时的底层 CRDT 引擎
+
+### Automerge
+
+- 主页：https://github.com/automerge/automerge
+- 用途：结构化文档同步与版本控制
+- 价值：可替代 Yjs，在某些场景更适合“结构化更新”
+
+## 3. 表格 / 公式引擎
+
+### HyperFormula
+
+- 主页：https://github.com/handsontable/hyperformula
+- 用途：Excel 公式计算、依赖图、增量重算
+- 价值：非常适合大表格计算场景
+
+### Handsontable
+
+- 主页：https://github.com/handsontable/handsontable
+- 用途：桌面级表格 UI
+- 价值：高性能渲染、Excel 风格交互
+
+### AG Grid
+
+- 主页：https://github.com/ag-grid/ag-grid
+- 用途：企业级表格渲染、网络数据表
+- 价值：适合处理大量数据与复杂列管理
+
+### react-virtualized / react-window
+
+- 主页：https://github.com/bvaughn/react-virtualized
+- 用途：大表单元格虚拟化渲染
+- 价值：提高大表的 UI 性能
+
+## 4. 存储
+
+### RocksDB
+
+- 主页：https://github.com/facebook/rocksdb
+- 用途：高性能 KV 数据存储
+- 价值：适合 block 存储、索引、快照对象缓存
+
+### SQLite
+
+- 主页：https://sqlite.org/
+- 用途：轻量本地数据库
+- 价值：适合桌面端本地缓存和单机模式
+
+## 5. 文件兼容
+
+### SheetJS
+
+- 主页：https://github.com/SheetJS/sheetjs
+- 用途：XLSX / CSV / 导入导出
+- 价值：非常适合快速支持 Excel 文件
+
+### Apache POI
+
+- 主页：https://poi.apache.org/
+- 用途：Java 端 Excel/OOXML 处理
+- 价值：适合后端或 Java 工程
+
+### OpenXML SDK
+
+- 主页：https://github.com/OfficeDev/Open-XML-SDK
+- 用途：微软 Office Open XML 处理
+- 价值：适用于 .NET / C# 环境
+
+## 6. 安全 / 加密 / 签名
+
+### ed25519-dalek
+
+- 主页：https://github.com/dalek-cryptography/ed25519-dalek
+- 用途：节点签名、可验证签名
+- 价值：适合 block 签名
+
+### ring / sodiumoxide
+
+- 主页：https://github.com/briansmith/ring
+- 用途：更成熟的加密与安全库
+- 价值：适合安全组件封装
+
+## 7. 插件与 Wasm
+
+### Wasmtime
+
+- 主页：https://github.com/bytecodealliance/wasmtime
+- 用途：Wasm 插件运行时
+- 价值：适用于自定义公式函数、图表插件等扩展
+
+### Wasmer
+
+- 主页：https://github.com/wasmerio/wasmer
+- 用途：Wasm 运行时
+- 价值：可作为替代方案
+
+## 8. 搜索 / 检索
+
+### Tantivy
+
+- 主页：https://github.com/quickwit-oss/tantivy
+- 用途：全文索引
+- 价值：适合大文本内容检索
+
+### Bleve
+
+- 主页：https://github.com/blevesearch/bleve
+- 用途：全文搜索
+- 价值：适合 Go/服务端开发
+
+### Faiss
+
+- 主页：https://github.com/facebookresearch/faiss
+- 用途：向量索引 / 语义搜索
+- 价值：适合分析搜索场景
+
+## 9. 监控与运维
+
+### Prometheus
+
+- 主页：https://prometheus.io/
+- 用途：指标收集
+
+### Grafana
+
+- 主页：https://grafana.com/
+- 用途：监控与图表展示
+
+### Sentry
+
+- 主页：https://sentry.io/
+- 价值：前端和后端异常监控
+
+## 10. 适合本项目的落地组合
+
+推荐工程组合：
+
+- 前端：React + TypeScript + Vite + Handsontable / AG Grid
+- 计算：HyperFormula
+- 协同：Yjs
+- 局域网：libp2p + mdns + gossipsub
+- 存储：RocksDB + SQLite
+- 导出：SheetJS
+- 安全：ed25519-dalek
+- 监控：Prometheus + Grafana
+
+## 11. 设计建议
+
+本项目不建议从零开始做所有底层：
+
+- 先用 Yjs 验证最终一致性
+- 先用 HyperFormula 验证公式引擎能力
+- 先用 libp2p 做局域网发现与同步
+- 再做 block 链与审计模型
+- 最后接入安全、权限和企业功能
+
+## 12. 结论
+
+快速落地最优方案是：
+
+- Yjs + HyperFormula + React + libp2p + RocksDB + SheetJS
+
+初版做成 demo 时，尽量保留架构清晰、可拆分组件，这样后续可以逐步升级为企业级应用。
