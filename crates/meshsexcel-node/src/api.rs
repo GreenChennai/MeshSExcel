@@ -11,14 +11,23 @@ use axum::{
 };
 use meshsexcel_core::sheet::WorkbookGrid;
 use meshsexcel_core::{Block, CellOp};
+use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+/// 编译期内嵌 UI 资源(index.html / app.* / vendor/luckysheet/**)。
+/// debug 构建直接读盘(改前端不用重编),release 构建打进二进制。
+#[derive(RustEmbed)]
+#[folder = "ui/"]
+struct UiAssets;
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(ui_index))
+        .route("/sheet.html", get(ui_sheet))
         .route("/app.css", get(ui_css))
         .route("/app.js", get(ui_js))
+        .route("/vendor/*path", get(ui_vendor))
         .route("/v1/node/info", get(node_info))
         .route("/v1/documents", get(list_documents).post(create_document))
         .route("/v1/documents/:doc_id", get(get_document))
@@ -83,6 +92,13 @@ async fn ui_index() -> impl IntoResponse {
     )
 }
 
+async fn ui_sheet() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!("../ui/sheet.html"),
+    )
+}
+
 async fn ui_css() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
@@ -98,6 +114,39 @@ async fn ui_js() -> impl IntoResponse {
         )],
         include_str!("../ui/app.js"),
     )
+}
+
+/// vendor 静态资源(Luckysheet 等,经 rust-embed 内嵌)。
+async fn ui_vendor(Path(path): Path<String>) -> Response {
+    // 防目录穿越
+    if path.split('/').any(|seg| seg == "..") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    // 路由捕获的是 /vendor/ 之后的部分,补全为 ui/ 内的完整键
+    match UiAssets::get(&format!("vendor/{path}")) {
+        Some(f) => ([(header::CONTENT_TYPE, mime_of(&path))], f.data).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn mime_of(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "css" => "text/css; charset=utf-8",
+        "js" => "application/javascript; charset=utf-8",
+        "html" => "text/html; charset=utf-8",
+        "json" => "application/json",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "jpg" | "jpeg" => "image/jpeg",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "eot" => "application/vnd.ms-fontobject",
+        "otf" => "font/otf",
+        _ => "application/octet-stream",
+    }
 }
 
 // ---------------------------------------------------------------------------

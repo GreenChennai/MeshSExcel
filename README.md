@@ -11,11 +11,11 @@ MeshSExcel 是一个面向局域网内企业协作的在线办公表格软件,�
 - XLSX / CSV 导入导出(公式写成真公式,WPS / Excel 可直接重算)
 - 单二进制交付:REST API + 内嵌 Web UI + SQLite 存档
 
-![MeshSExcel 界面](docs/screenshot-main.png)
+Web 端表格组件采用开源的 **Luckysheet**(MIT)——完整办公级交互:工具栏、
+名称框 + 编辑栏、右键菜单、列宽拖拽、撤销重做、合并/筛选/排序、底部统计栏、
+多工作表标签,内嵌进单二进制(经 iframe 隔离 + postMessage 与协同层适配)。
 
-界面参照 LibreOffice Calc / WPS 表格:Ribbon 功能区(开始/插入/公式/数据/视图)、
-名称框 + 编辑栏、行列表头、区域选择与状态栏统计(计数/求和/平均)、单元格内编辑、
-右键菜单、列宽拖拽、字体/填充颜色、自动求和、缩放、工作表标签(右键管理)。
+![MeshSExcel 界面](docs/screenshot-main.png)
 
 ## 当前实现状态(2026-10)
 

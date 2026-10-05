@@ -1,65 +1,33 @@
-/* MeshSExcel UI —— LibreOffice Calc / WPS 风格前端(无构建、无依赖)。
+/* MeshSExcel 前端适配器:LibreOffice 血统的 Luckysheet(MIT)做表格 UI,
+ * 本文件把 Luckysheet 数据模型 ↔ MeshSExcel block/LWW REST 打通。
  *
- * 数据流:本地编辑 → 乐观更新 → 批量 POST /ops(服务端签名成 block 并广播)
- * 每 2.5s 轮询 /cells 对账(gossip 同步的结果由此回流)。
- * 区域选择 / 单元格内编辑 / 右键菜单 / 列宽拖拽 / 内部复制粘贴 均在此实现。 */
+ * 数据流:用户在 Luckysheet 里编辑 → hook 触发 → diff 出变更 → 转成
+ * CellOp 批量 POST /ops(服务端签名上链 + gossip);反向每 2.5s 轮询
+ * /cells,发现远端变更且本地无未保存编辑时整簿重建。 */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-
-/* ============================ 全局状态 ============================ */
 
 const state = {
   info: null,
   docs: [],
   docId: null,
-  grid: null,            // WorkbookGrid
+  grid: null,
   sheet: null,
-  sel: null,             // {ar, ac, er, ec} 锚点 + 扩展端(行列均 1-based)
-  editing: false,        // 单元格内编辑中
-  editingCell: null,     // {row, col}
-  pending: new Map(),    // "sheet!r,c" -> op
+  pending: new Map(),   // "sheet!r,c" -> 最近一次待保存 op
   saveTimer: null,
-  clipboard: null,       // {w, h, cells: [[{value, formula, style}]]}
-  colW: {},              // col index -> px(会话级)
-  zoom: 1,
-  showFormula: false,
+  syncTimer: null,
+  luckReady: false,
+  luckySheets: [],
+  syncing: false,       // 正在把本地 diff 推给服务端
   peers: [],
-  fontColor: "#e03131",
-  fillColor: "#fff3bf",
 };
 
-const MIN_ROWS = 60, MIN_COLS = 20, PAD_ROWS = 14, PAD_COLS = 6;
-const FONT_COLORS = ["#e03131", "#e8590c", "#f08c00", "#2b8a3e", "#1971c2", "#6741d9", "#c2255c", "#1f2328"];
-const FILL_COLORS = ["#fff3bf", "#ffe3e3", "#d3f9d8", "#d0ebff", "#e5dbff", "#ffdeeb", "#e9ecef", "#ffffff"];
+/* lastSynced:{ [sheetName]: { "r,c": canonicalCell } } ——
+ * 已与服务端对齐的镜像;一切 diff 都以它为基准。 */
+let lastSynced = {};
 
 /* ============================ 基础工具 ============================ */
-
-function colName(n) {
-  let s = "";
-  while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = (n - 1 - r) / 26; }
-  return s;
-}
-function parseCol(s) {
-  let n = 0;
-  for (const ch of s.toUpperCase()) {
-    if (ch < "A" || ch > "Z") return null;
-    n = n * 26 + (ch.charCodeAt(0) - 64);
-  }
-  return n || null;
-}
-function parseA1(a1) {
-  const m = /^([A-Za-z]{1,3})(\d+)$/.exec(a1.trim());
-  if (!m) return null;
-  const col = parseCol(m[1]);
-  const row = parseInt(m[2], 10);
-  return row >= 1 && col ? { row, col } : null;
-}
-function a1(row, col) { return colName(col) + row; }
-function rangeText(sel) {
-  const a = a1(sel.ar, sel.ac), b = a1(sel.er, sel.ec);
-  return a === b ? a : `${a}:${b}`;
-}
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -70,7 +38,7 @@ async function api(path, opts) {
   }
   return res;
 }
-const apiJson = (path, opts) => api(path, opts).then((r) => r.json());
+const apiJson = (p, o) => api(p, o).then((r) => r.json());
 
 let toastTimer = null;
 function toast(text, kind) {
@@ -82,384 +50,172 @@ function toast(text, kind) {
   toastTimer = setTimeout(() => { el.hidden = true; }, kind === "err" ? 4200 : 2400);
 }
 
-/* ============================ 网格数据 ============================ */
+/* ============================ 模型转换 ============================ */
 
-function sheetData() {
-  if (!state.grid) return null;
-  return state.grid.sheets.find((s) => s.name === state.sheet) || state.grid.sheets[0] || null;
-}
-function cellAt(row, col) {
-  const sd = sheetData();
-  if (!sd) return null;
-  return sd.cells.find((c) => c.row === row && c.col === col) || null;
-}
-function rawOf(cell) {
-  if (!cell) return "";
-  if (cell.formula) return cell.formula;
-  return cell.value || "";
-}
-function isNumericDisplay(cell) {
-  if (!cell || cell.formula) return false;
-  const v = cell.value;
-  return v !== null && v !== undefined && v !== "" && !isNaN(Number(v));
-}
-function selRect() {
-  const s = state.sel;
-  if (!s) return null;
-  return {
-    r1: Math.min(s.ar, s.er), c1: Math.min(s.ac, s.ec),
-    r2: Math.max(s.ar, s.er), c2: Math.max(s.ac, s.ec),
-  };
+/// 服务端 cell(grid.cells 元素)→ 规范形 { value?, formula?, style? }
+function serverCellToOurs(c) {
+  const ours = {};
+  if (c.formula) ours.formula = c.formula;
+  if (c.value !== null && c.value !== undefined && c.value !== "") ours.value = String(c.value);
+  if (c.style && Object.keys(c.style).length) ours.style = c.style;
+  return ours.value !== undefined || ours.formula !== undefined || ours.style ? ours : null;
 }
 
-/* ============================ 渲染 ============================ */
-
-const tdIndex = new Map();   // "r,c" -> td(选中类增量更新用)
-const colHeadIndex = new Map();
-let rowHeadEls = [];
-
-function renderAll() {
-  renderChrome();
-  renderTabs();
-  renderGrid();
-  updateSelectionUI();
+/// Luckysheet cell v 对象 → 规范形(忽略我们不支持的属性,避免伪 diff)
+function luckyCellToOurs(v) {
+  if (!v || typeof v !== "object") return null;
+  const ours = {};
+  if (typeof v.f === "string" && v.f.length) ours.formula = "=" + v.f.replace(/^=/, "");
+  if (v.v !== undefined && v.v !== null && v.v !== "") ours.value = String(v.v);
+  const style = {};
+  if (v.bl) style.bold = true;
+  if (v.fc) style.color = v.fc;
+  if (v.bg) style.bg = v.bg;
+  if (v.ht === 0) style.align = "left";
+  else if (v.ht === 1) style.align = "center";
+  else if (v.ht === 2) style.align = "right";
+  if (Object.keys(style).length) ours.style = style;
+  return ours.value !== undefined || ours.formula !== undefined || ours.style ? ours : null;
 }
 
-function renderChrome() {
-  $("docName").textContent = state.grid ? state.grid.name : (state.docId || "未打开文档");
-  document.title = (state.grid ? state.grid.name + " - " : "") + "MeshSExcel";
-  const has = !!state.docId;
-  for (const id of ["formulaInput", "nameBox"]) $(id).disabled = !has;
-  $("peersCount").textContent = `${state.peers.length} 节点`;
-}
+/* 排序键序列化:避免同内容不同键序被判为 diff 产生回声 op */
+const canon = (cell) => (cell ? JSON.stringify(cell, Object.keys(cell).sort()) : "");
 
-function renderTabs() {
-  const host = $("sheetTabs");
-  host.innerHTML = "";
-  if (!state.grid) return;
-  for (const s of state.grid.sheets) {
-    const b = document.createElement("button");
-    b.className = "sheet-tab" + (s.name === state.sheet ? " active" : "");
-    b.setAttribute("role", "tab");
-    b.setAttribute("aria-selected", s.name === state.sheet ? "true" : "false");
-    b.textContent = s.name;
-    b.onclick = () => { state.sheet = s.name; state.sel = null; renderGrid(); updateSelectionUI(); };
-    b.oncontextmenu = (ev) => { ev.preventDefault(); sheetTabMenu(ev, s.name); };
-    host.appendChild(b);
-  }
-}
-
-function extent(sd) {
-  const rows = Math.max(sd ? sd.rows : 0, 0) + PAD_ROWS;
-  const cols = Math.max(sd ? sd.cols : 0, 0) + PAD_COLS;
-  return { rows: Math.max(rows, MIN_ROWS), cols: Math.max(cols, MIN_COLS) };
-}
-
-function renderGrid() {
-  const table = $("gridTable");
-  const sd = sheetData();
-  table.innerHTML = "";
-  tdIndex.clear();
-  colHeadIndex.clear();
-  rowHeadEls = [];
-  if (!state.grid || !sd) {
-    $("gridHost").hidden = true;
-    $("emptyState").style.display = "";
-    return;
-  }
-  $("emptyState").style.display = "none";
-  $("gridHost").hidden = false;
-
-  const { rows, cols } = extent(sd);
-
-  // 列宽(colgroup,支持拖拽调宽)
-  const colgroup = document.createElement("colgroup");
-  const rc = document.createElement("col");
-  rc.className = "rowhead-col";
-  colgroup.appendChild(rc);
-  for (let c = 1; c <= cols; c++) {
-    const col = document.createElement("col");
-    if (state.colW[c]) col.style.width = state.colW[c] + "px";
-    colgroup.appendChild(col);
-  }
-  table.appendChild(colgroup);
-
-  // 表头
-  const thead = document.createElement("thead");
-  const hr = document.createElement("tr");
-  const corner = document.createElement("th");
-  corner.className = "corner";
-  corner.setAttribute("aria-label", "全选");
-  hr.appendChild(corner);
-  for (let c = 1; c <= cols; c++) {
-    const th = document.createElement("th");
-    th.textContent = colName(c);
-    th.dataset.col = c;
-    const rz = document.createElement("div");
-    rz.className = "col-resizer";
-    rz.dataset.col = c;
-    th.appendChild(rz);
-    colHeadIndex.set(c, th);
-    hr.appendChild(th);
-  }
-  thead.appendChild(hr);
-  table.appendChild(thead);
-
-  // 表体
-  const tbody = document.createElement("tbody");
-  for (let r = 1; r <= rows; r++) {
-    const tr = document.createElement("tr");
-    const th = document.createElement("th");
-    th.textContent = r;
-    rowHeadEls.push(th);
-    tr.appendChild(th);
-    for (let c = 1; c <= cols; c++) {
-      tr.appendChild(renderCell(r, c));
+/// WorkbookGrid → lastSynced 镜像
+function gridToMirror(grid) {
+  const mirror = {};
+  for (const s of grid.sheets) {
+    const m = {};
+    for (const c of s.cells) {
+      const ours = serverCellToOurs(c);
+      if (ours) m[c.row - 1 + "," + (c.col - 1)] = ours;
     }
-    tbody.appendChild(tr);
+    mirror[s.name] = m;
   }
-  table.appendChild(tbody);
+  return mirror;
 }
 
-function renderCell(r, c) {
-  const td = document.createElement("td");
-  td.dataset.row = r;
-  td.dataset.col = c;
-  td.setAttribute("role", "gridcell");
-  tdIndex.set(r + "," + c, td);
-  const cell = cellAt(r, c);
-  if (cell) {
-    if (state.showFormula && cell.formula) td.textContent = cell.formula;
-    else td.textContent = cell.value || "";
-    if (cell.formula) td.classList.add("formula");
-    const st = cell.style || {};
-    if (st.bold) td.classList.add("bold");
-    if (st.align === "center") td.classList.add("center");
-    if (st.align === "right") td.classList.add("right");
-    if (st.bg) td.style.background = st.bg;
-    if (st.color) td.style.color = st.color;
-    if (/^#(?:DIV\/0!|VALUE!|NAME\?|REF!|CIRC!|NUM!|RANGE!)/.test(cell.value || "")) td.classList.add("err");
-    else if (isNumericDisplay(cell)) td.classList.add("right");
-  }
-  td.addEventListener("mousedown", onCellMouseDown);
-  td.addEventListener("dblclick", () => { setSelection(r, c); openEditor(); });
-  td.addEventListener("contextmenu", (ev) => { ev.preventDefault(); cellMenu(ev, r, c); });
-  return td;
+/// WorkbookGrid → Luckysheet options.data
+function gridToLucky(grid) {
+  return grid.sheets.map((s, i) => ({
+    name: s.name,
+    color: "",
+    status: s.name === state.sheet ? 1 : 0,
+    order: i,
+    index: String(i),
+    rowCount: Math.max(84, s.rows + 20),
+    columnCount: Math.max(26, s.cols + 8),
+    zoomRatio: 1,
+    celldata: s.cells.map((c) => {
+      const v = {};
+      if (c.formula) v.f = c.formula.replace(/^=/, "");
+      if (c.value !== null && c.value !== undefined && c.value !== "") {
+        const n = Number(c.value);
+        if (!isNaN(n) && c.value.trim() !== "") {
+          v.v = n;
+          v.ct = { t: "n" };
+        } else {
+          v.v = c.value;
+          v.ct = { t: "s" };
+        }
+      }
+      if (c.style) {
+        if (c.style.bold) v.bl = 1;
+        if (c.style.color) v.fc = c.style.color;
+        if (c.style.bg) v.bg = c.style.bg;
+        if (c.style.align === "center") v.ht = 1;
+        else if (c.style.align === "right") v.ht = 2;
+        else if (c.style.align === "left") v.ht = 0;
+      }
+      return { r: c.row - 1, c: c.col - 1, v: Object.keys(v).length ? v : null };
+    }),
+    config: {},
+  }));
 }
 
-/* ============================ 选择 ============================ */
-
-function setSelection(ar, ac, er, ec) {
-  state.sel = { ar, ac, er: er ?? ar, ec: ec ?? ac };
-  updateSelectionUI();
+/// 最近一次 Luckysheet 上报的表数据 → 镜像
+function luckyToMirror() {
+  const mirror = {};
+  for (const s of state.luckySheets || []) {
+    const m = {};
+    for (const cd of s.celldata || []) {
+      const ours = luckyCellToOurs(cd.v);
+      if (ours) m[cd.r + "," + cd.c] = ours;
+    }
+    mirror[s.name] = m;
+  }
+  return mirror;
 }
 
-function updateSelectionUI() {
-  const rect = selRect();
-  // 清掉旧类
-  for (const td of tdIndex.values()) td.classList.remove("sel-anchor", "sel-range");
-  for (const th of colHeadIndex.values()) th.classList.remove("col-sel");
-  for (const th of rowHeadEls) th.classList.remove("row-sel");
-  if (!rect || !state.grid) {
-    $("nameBox").value = "";
-    $("selStats").textContent = "";
-    refreshRibbonState();
-    return;
+/* ============================ 出向:本地编辑 → ops ============================ */
+
+let diffTimer = null;
+function scheduleLocalDiff() {
+  clearTimeout(diffTimer);
+  diffTimer = setTimeout(pushLocalDiff, 350);
+}
+
+function pushLocalDiff() {
+  if (!state.docId || state.syncing) return;
+  const lucky = luckyToMirror();
+  const ops = [];
+  // 表级增删(Luckysheet 工作表栏的新建/删除/重命名都会在这里体现)
+  for (const name of Object.keys(lucky)) {
+    if (!(name in lastSynced)) {
+      ops.push({ stamp: { ts: 0, author: "" }, type: "add_sheet", sheet: name, position: null });
+    }
   }
-  for (let r = rect.r1; r <= rect.r2; r++) {
-    for (let c = rect.c1; c <= rect.c2; c++) {
-      const td = tdIndex.get(r + "," + c);
-      if (td) {
-        td.classList.add("sel-range");
-        if (r === state.sel.ar && c === state.sel.ac) td.classList.add("sel-anchor");
+  for (const name of Object.keys(lastSynced)) {
+    if (!(name in lucky)) {
+      ops.push({ stamp: { ts: 0, author: "" }, type: "remove_sheet", sheet: name });
+    }
+  }
+  // 单元格级
+  for (const [name, cells] of Object.entries(lucky)) {
+    if (!(name in lastSynced)) continue;
+    const base = lastSynced[name];
+    for (const [key, ours] of Object.entries(cells)) {
+      if (canon(base[key]) !== canon(ours)) {
+        const [r, c] = key.split(",").map(Number);
+        ops.push(cellOp(name, r, c, ours));
+      }
+    }
+    for (const [key, ours] of Object.entries(base)) {
+      if (!(key in cells)) {
+        const [r, c] = key.split(",").map(Number);
+        ops.push(cellOp(name, r, c, null));
       }
     }
   }
-  for (let c = rect.c1; c <= rect.c2; c++) colHeadIndex.get(c)?.classList.add("col-sel");
-  for (let r = rect.r1; r <= rect.r2; r++) {
-    const th = rowHeadEls[r - 1];
-    if (th) th.classList.add("row-sel");
+  if (ops.length === 0) return;
+  // 更新镜像(以我们发出的为准),避免轮询回声触发重建
+  for (const name of Object.keys(lucky)) {
+    lastSynced[name] = lastSynced[name] || {};
+    for (const [key, ours] of Object.entries(lucky[name])) lastSynced[name][key] = ours;
   }
-  $("nameBox").value = rangeText(state.sel);
-  updateStats();
-  syncFormulaBar();
-  refreshRibbonState();
-}
-
-function updateStats() {
-  const rect = selRect();
-  if (!rect) { $("selStats").textContent = ""; return; }
-  let count = 0, sum = 0;
-  for (let r = rect.r1; r <= rect.r2; r++) {
-    for (let c = rect.c1; c <= rect.c2; c++) {
-      const cell = cellAt(r, c);
-      if (!cell || cell.formula) continue;
-      const n = Number(cell.value);
-      if (cell.value !== null && cell.value !== "" && !isNaN(n)) { count++; sum += n; }
-    }
+  for (const name of Object.keys(lastSynced)) {
+    if (!(name in lucky)) delete lastSynced[name];
   }
-  if (count > 0) {
-    const avg = sum / count;
-    const fmt = (x) => Number(x.toFixed(4)).toString();
-    $("selStats").textContent = `计数:${count}  求和:${fmt(sum)}  平均:${fmt(avg)}`;
-  } else {
-    $("selStats").textContent = "";
-  }
+  enqueueOps(ops);
 }
 
-function onCellMouseDown(ev) {
-  const r = +ev.currentTarget.dataset.row;
-  const c = +ev.currentTarget.dataset.col;
-  closeEditor(false);
-  if (ev.shiftKey && state.sel) {
-    setSelection(state.sel.ar, state.sel.ac, r, c);
-  } else {
-    setSelection(r, c);
-    // 拖拽扩展选择
-    const onMove = (e2) => {
-      const td = e2.target.closest("td[data-row]");
-      if (td) setSelection(state.sel.ar, state.sel.ac, +td.dataset.row, +td.dataset.col);
-    };
-    const onUp = () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  }
-  ev.preventDefault();
-  $("gridWrap").focus();
-}
-
-function scrollSelIntoView() {
-  if (!state.sel) return;
-  const td = tdIndex.get(state.sel.ar + "," + state.sel.ac);
-  td?.scrollIntoView({ block: "nearest", inline: "nearest" });
-}
-
-/* ============================ 编辑 ============================ */
-
-function anchorCell() {
-  if (!state.sel) return null;
-  return cellAt(state.sel.ar, state.sel.ac);
-}
-
-function syncFormulaBar() {
-  if (document.activeElement === $("formulaInput")) return;
-  $("formulaInput").value = rawOf(anchorCell());
-}
-
-function openEditor(initial) {
-  if (!state.sel) return;
-  const { ar, ac } = state.sel;
-  const cell = cellAt(ar, ac);
-  const ed = $("cellEditor");
-  const td = tdIndex.get(ar + "," + ac);
-  if (!td) return;
-  state.editing = true;
-  state.editingCell = { row: ar, col: ac };
-  const hostRect = $("gridHost").getBoundingClientRect();
-  const tdRect = td.getBoundingClientRect();
-  ed.style.left = (tdRect.left - hostRect.left) + "px";
-  ed.style.top = (tdRect.top - hostRect.top) + "px";
-  ed.style.width = Math.max(tdRect.width, 80) + "px";
-  ed.style.height = tdRect.height + "px";
-  ed.hidden = false;
-  ed.value = initial !== undefined ? initial : rawOf(cell);
-  $("formulaInput").value = ed.value;
-  setMode("输入");
-  ed.focus();
-  ed.setSelectionRange(ed.value.length, ed.value.length);
-}
-
-function closeEditor(commit, move) {
-  const ed = $("cellEditor");
-  if (!state.editing) { if (!commit) return; }
-  if (state.editing && commit && state.editingCell) {
-    const { row, col } = state.editingCell;
-    const next = ed.value;
-    if (next !== rawOf(cellAt(row, col))) enqueueCellWrite(row, col, next);
-  }
-  state.editing = false;
-  state.editingCell = null;
-  ed.hidden = true;
-  setMode("就绪");
-  if (move === "down") moveSel(1, 0);
-  else if (move === "right") moveSel(0, 1);
-  else if (move === "up") moveSel(-1, 0);
-  else if (move === "left") moveSel(0, -1);
-  else { syncFormulaBar(); }
-}
-
-function setMode(m) {
-  const el = $("modeCell");
-  el.textContent = m;
-  el.classList.toggle("editing", m === "输入");
-}
-
-function moveSel(dr, dc, extend) {
-  if (!state.sel) { setSelection(1, 1); return; }
-  if (extend) {
-    setSelection(state.sel.ar, state.sel.ac,
-      Math.max(1, state.sel.er + dr), Math.max(1, state.sel.ec + dc));
-  } else {
-    setSelection(
-      Math.max(1, state.sel.er + dr),
-      Math.max(1, state.sel.ec + dc));
-  }
-  scrollSelIntoView();
-}
-
-/* ============================ 写入 / 保存 ============================ */
-
-function enqueueCellWrite(row, col, raw, styleOverride) {
-  if (!state.docId || !state.sheet) return;
-  const isFormula = typeof raw === "string" && raw.startsWith("=");
-  const key = `${state.sheet}!${row},${col}`;
-  const prev = cellAt(row, col);
-  const op = {
+function cellOp(sheet, r, c, ours) {
+  return {
     stamp: { ts: 0, author: "" },
     type: "set_cell",
-    sheet: state.sheet,
-    row, col,
-    value: isFormula ? null : (raw === "" ? null : raw),
-    formula: isFormula ? raw : null,
-    style: styleOverride !== undefined ? styleOverride : ((prev && prev.style) || null),
+    sheet,
+    row: r + 1,
+    col: c + 1,
+    value: ours && ours.value !== undefined ? ours.value : null,
+    formula: ours && ours.formula !== undefined ? ours.formula : null,
+    style: ours && ours.style ? ours.style : null,
   };
-  state.pending.set(key, op);
-  applyLocalOp(op);
-  scheduleSave();
 }
 
-function applyLocalOp(op) {
-  if (!state.grid) return;
-  let sd = state.grid.sheets.find((s) => s.name === op.sheet);
-  if (!sd) {
-    sd = { name: op.sheet, rows: 0, cols: 0, cells: [] };
-    state.grid.sheets.push(sd);
+function enqueueOps(ops) {
+  for (const op of ops) {
+    state.pending.set(`${op.sheet}!${op.row},${op.col}`, op);
   }
-  let cell = sd.cells.find((c) => c.row === op.row && c.col === op.col);
-  const empty = op.value === null && op.formula === null && !op.style;
-  if (empty) {
-    sd.cells = sd.cells.filter((c) => !(c.row === op.row && c.col === op.col));
-  } else if (cell) {
-    cell.value = op.value !== null ? op.value : (op.formula ? "" : null);
-    cell.formula = op.formula;
-    cell.style = op.style;
-  } else {
-    sd.cells.push({
-      row: op.row, col: op.col,
-      value: op.value !== null ? op.value : (op.formula ? "" : null),
-      formula: op.formula, style: op.style,
-    });
-  }
-  sd.rows = Math.max(sd.rows, op.row);
-  sd.cols = Math.max(sd.cols, op.col);
-  renderGrid();
-  updateSelectionUI();
-}
-
-function scheduleSave() {
   setSaveState("保存中…", false);
   clearTimeout(state.saveTimer);
   state.saveTimer = setTimeout(flushSave, 350);
@@ -479,7 +235,7 @@ async function flushSave() {
     markSync();
   } catch (e) {
     setSaveState("保存失败,重试中", true);
-    toast("保存失败:" + e.message + "(编辑已暂存,恢复后自动重试)", "err");
+    toast("保存失败:" + e.message + "(编辑已暂存)", "err");
     for (const op of ops) state.pending.set(`${op.sheet}!${op.row},${op.col}`, op);
   }
 }
@@ -489,7 +245,6 @@ function setSaveState(text, err) {
   el.textContent = text;
   el.classList.toggle("err", !!err);
 }
-
 function markSync() {
   const t = new Date();
   const el = $("syncState");
@@ -497,19 +252,17 @@ function markSync() {
   el.classList.remove("err");
 }
 
-/* ============================ 轮询对账 ============================ */
+/* ============================ 入向:远端 → Luckysheet ============================ */
 
-async function poll() {
-  if (!state.docId || state.pending.size > 0 || state.editing || document.hidden) return;
+async function pollRemote() {
+  if (!state.docId || state.pending.size > 0 || state.syncing || document.hidden) return;
   try {
     const grid = await apiJson(`/v1/documents/${state.docId}/cells`);
-    state.grid = grid;
-    if (!grid.sheets.find((s) => s.name === state.sheet)) {
-      state.sheet = grid.sheets[0] ? grid.sheets[0].name : null;
+    const remote = gridToMirror(grid);
+    if (mirrorDiffers(lastSynced, remote)) {
+      await rebuildFromRemote(grid, remote);
     }
-    renderGrid();
-    updateSelectionUI();
-    setSaveState("", false);
+    setSaveState(( $("saveState").textContent || "").replace("保存失败,重试中", ""), false);
     markSync();
   } catch (_) {
     const el = $("syncState");
@@ -518,258 +271,116 @@ async function poll() {
   }
 }
 
+function mirrorDiffers(a, b) {
+  const ka = Object.keys(a), kb = Object.keys(b);
+  if (ka.length !== kb.length) return true;
+  for (const k of ka) {
+    if (!(k in b)) return true;
+    const ma = a[k], mb = b[k];
+    const keys = new Set([...Object.keys(ma), ...Object.keys(mb)]);
+    for (const ck of keys) {
+      if (canon(ma[ck]) !== canon(mb[ck])) return true;
+    }
+  }
+  return false;
+}
+
+async function rebuildFromRemote(grid, remote) {
+  state.syncing = true;
+  try {
+    state.grid = grid;
+    state.sheet = grid.sheets.find((s) => s.name === state.sheet)
+      ? state.sheet
+      : (grid.sheets[0] ? grid.sheets[0].name : null);
+    lastSynced = remote;
+    createLucky(grid);
+    await new Promise((r) => setTimeout(r, 120));
+  } finally {
+    state.syncing = false;
+  }
+}
+
+/* ============================ Luckysheet 装载 ============================ */
+
+function createLucky(grid) {
+  state.luckReady = false;
+  sendToSheet({ type: "load", title: grid.name, data: gridToLucky(grid) });
+}
+
+function sendToSheet(msg) {
+  $("luckyFrame").contentWindow.postMessage(msg, "*");
+}
+
+function onSheetMessage(ev) {
+  const msg = ev.data || {};
+  if (ev.source !== $("luckyFrame").contentWindow) return;
+  if (msg.type === "ready") {
+    state.luckReady = true;
+  } else if (msg.type === "changed") {
+    state.luckySheets = msg.sheets || [];
+    scheduleLocalDiff();
+  } else if (msg.type === "create-error") {
+    toast("表格组件加载失败:" + msg.message, "err");
+  }
+}
+
+/* ============================ 文档生命周期 ============================ */
+
+async function loadDoc(docId) {
+  state.docId = docId;
+  location.hash = docId ? "#doc=" + docId : "";
+  lastSynced = {};
+  if (!docId) {
+    state.grid = null;
+    $("luckyFrame").hidden = true;
+    $("emptyState").style.display = "";
+    refreshDocUi();
+    return;
+  }
+  const grid = await apiJson(`/v1/documents/${docId}/cells`);
+  state.grid = grid;
+  state.sheet = grid.sheets[0] ? grid.sheets[0].name : null;
+  lastSynced = gridToMirror(grid);
+  $("emptyState").style.display = "none";
+  $("luckyFrame").hidden = false;
+  createLucky(grid);
+  refreshDocUi();
+  markSync();
+}
+
+function refreshDocUi() {
+  const sel = $("docSel");
+  sel.innerHTML = "";
+  for (const d of state.docs) {
+    const opt = document.createElement("option");
+    opt.value = d.id;
+    opt.textContent = d.name;
+    if (d.id === state.docId) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  sel.disabled = state.docs.length === 0;
+  const has = !!state.docId;
+  for (const id of ["historyBtn", "snapshotBtn"]) $(id).disabled = !has;
+}
+
+async function refreshDocList() {
+  state.docs = await apiJson("/v1/documents");
+  if (!state.docId && state.docs.length > 0) {
+    await loadDoc(state.docs[state.docs.length - 1].id);
+  } else if (state.docId && !state.docs.find((d) => d.id === state.docId)) {
+    await loadDoc(null);
+  }
+  refreshDocUi();
+}
+
 async function pollPeers() {
   try {
     state.peers = await apiJson("/v1/nodes/peers");
-    renderChrome();
+    $("peersCount").textContent = `${state.peers.length} 节点`;
   } catch (_) { /* 忽略 */ }
 }
-async function pollForce() {
-  const grid = await apiJson(`/v1/documents/${state.docId}/cells`);
-  state.grid = grid;
-}
 
-/* ============================ 样式 ============================ */
-
-function forSelectionCells(fn) {
-  const rect = selRect();
-  if (!rect) return;
-  for (let r = rect.r1; r <= rect.r2; r++) {
-    for (let c = rect.c1; c <= rect.c2; c++) {
-      fn(r, c, cellAt(r, c));
-    }
-  }
-}
-
-function applyStyleToSelection(patch, mode) {
-  if (!state.sel) return;
-  // 以锚点格的样式为基准做切换
-  const base = (anchorCell()?.style) || {};
-  forSelectionCells((r, c, cell) => {
-    const cur = (cell?.style) || {};
-    let next;
-    if (mode === "clear") next = null;
-    else {
-      next = { ...cur };
-      if (patch.bold !== undefined) next.bold = !base.bold;
-      if (patch.color !== undefined) next.color = patch.color || null;
-      if (patch.bg !== undefined) next.bg = patch.bg || null;
-      if (patch.align !== undefined) next.align = patch.align || null;
-      if (next.bold === false && !next.color && !next.bg && !next.align) next = null;
-    }
-    enqueueCellWrite(r, c, rawOf(cell), next);
-  });
-  scheduleSave();
-}
-
-function updateBoldButton() {
-  const on = !!(anchorCell()?.style?.bold);
-  $("boldBtn").classList.toggle("on", on);
-}
-
-/* ============================ 颜色浮层 ============================ */
-
-function showColorPop(anchorBtn, colors, onPick, allowNone) {
-  const pop = $("colorPop");
-  pop.innerHTML = "";
-  const title = document.createElement("div");
-  title.className = "cp-title";
-  title.textContent = allowNone ? "选择颜色(可选“无”)" : "选择颜色";
-  pop.appendChild(title);
-  const grid = document.createElement("div");
-  grid.className = "color-grid";
-  if (allowNone) {
-    const none = document.createElement("button");
-    none.className = "swatch none";
-    none.title = "无填充";
-    none.onclick = () => { onPick(null); hideColorPop(); };
-    grid.appendChild(none);
-  }
-  for (const c of colors) {
-    const b = document.createElement("button");
-    b.className = "swatch";
-    b.style.background = c;
-    b.title = c;
-    b.onclick = () => { onPick(c); hideColorPop(); };
-    grid.appendChild(b);
-  }
-  pop.appendChild(grid);
-  const rect = anchorBtn.getBoundingClientRect();
-  pop.hidden = false;
-  const pw = pop.offsetWidth, ph = pop.offsetHeight;
-  pop.style.left = Math.min(rect.left, innerWidth - pw - 8) + "px";
-  pop.style.top = (rect.bottom + 4 + ph > innerHeight ? rect.top - ph - 4 : rect.bottom + 4) + "px";
-}
-function hideColorPop() { $("colorPop").hidden = true; }
-
-/* ============================ 右键菜单 ============================ */
-
-function showCtxMenu(ev, items) {
-  const menu = $("ctxMenu");
-  menu.innerHTML = "";
-  for (const it of items) {
-    if (it === "-") {
-      const sep = document.createElement("div");
-      sep.className = "ctx-sep";
-      menu.appendChild(sep);
-      continue;
-    }
-    const b = document.createElement("button");
-    b.className = "ctx-item";
-    b.setAttribute("role", "menuitem");
-    b.innerHTML = `<span></span>${it.key ? `<span class="ks">${it.key}</span>` : ""}`;
-    b.firstChild.textContent = it.label;
-    b.disabled = !!it.disabled;
-    b.onclick = () => { hideCtxMenu(); it.action(); };
-    menu.appendChild(b);
-  }
-  menu.hidden = false;
-  const mw = menu.offsetWidth, mh = menu.offsetHeight;
-  menu.style.left = Math.min(ev.clientX, innerWidth - mw - 6) + "px";
-  menu.style.top = Math.min(ev.clientY, innerHeight - mh - 6) + "px";
-}
-function hideCtxMenu() { $("ctxMenu").hidden = true; }
-
-function cellMenu(ev, r, c) {
-  if (!state.sel || selRect().r1 > r || selRect().r2 < r || selRect().c1 > c || selRect().c2 < c) {
-    setSelection(r, c);
-  }
-  showCtxMenu(ev, [
-    { label: "复制", key: "Ctrl+C", action: copySelection },
-    { label: "粘贴", key: "Ctrl+V", action: pasteClipboard, disabled: !state.clipboard },
-    "-",
-    { label: "加粗", key: "Ctrl+B", action: () => applyStyleToSelection({ bold: true }) },
-    { label: "清除内容", key: "Del", action: clearContents },
-    { label: "清除格式", action: () => applyStyleToSelection({}, "clear") },
-  ]);
-}
-
-function sheetTabMenu(ev, name) {
-  showCtxMenu(ev, [
-    { label: "新建工作表", action: addSheetDialog },
-    { label: `删除「${name}」`, action: () => removeSheet(name), disabled: state.grid.sheets.length <= 1 },
-  ]);
-}
-
-/* ============================ 复制 / 粘贴 ============================ */
-
-function copySelection() {
-  const rect = selRect();
-  if (!rect) return;
-  const cells = [];
-  for (let r = rect.r1; r <= rect.r2; r++) {
-    const row = [];
-    for (let c = rect.c1; c <= rect.c2; c++) {
-      const cell = cellAt(r, c);
-      row.push(cell ? { value: cell.value, formula: cell.formula, style: cell.style } : null);
-    }
-    cells.push(row);
-  }
-  state.clipboard = { w: rect.c2 - rect.c1 + 1, h: rect.r2 - rect.r1 + 1, cells };
-  toast(`已复制 ${state.clipboard.h}×${state.clipboard.w}`);
-}
-
-function pasteClipboard() {
-  if (!state.clipboard || !state.sel) return;
-  const { w, h, cells } = state.clipboard;
-  const { ar, ac } = state.sel;
-  for (let dr = 0; dr < h; dr++) {
-    for (let dc = 0; dc < w; dc++) {
-      const src = cells[dr][dc];
-      const r = ar + dr, c = ac + dc;
-      const key = `${state.sheet}!${r},${c}`;
-      if (!src) {
-        state.pending.set(key, {
-          stamp: { ts: 0, author: "" }, type: "set_cell",
-          sheet: state.sheet, row: r, col: c, value: null, formula: null, style: null,
-        });
-        applyLocalOp(state.pending.get(key));
-      } else {
-        enqueueCellWrite(r, c, src.formula ?? src.value ?? "", src.style ?? null);
-      }
-    }
-  }
-  scheduleSave();
-}
-
-function clearContents() {
-  const rect = selRect();
-  if (!rect) return;
-  forSelectionCells((r, c, cell) => {
-    if (cell) enqueueCellWrite(r, c, "");
-  });
-  scheduleSave();
-}
-
-/* ============================ 自动求和 / 函数 ============================ */
-
-function insertFunction(fn) {
-  if (!state.sel) return;
-  const { ar, ac } = state.sel;
-  // 找当前列上方连续非空区
-  let top = ar - 1;
-  while (top >= 1 && ar - top < 100) {
-    const cell = cellAt(top, ac);
-    if (!cell || (cell.value === null && !cell.formula)) break;
-    top--;
-  }
-  top++;
-  const expr = top < ar ? `=${fn}(${a1(top, ac)}:${a1(ar - 1, ac)})` : `=${fn}()`;
-  setSelection(ar, ac);
-  openEditor(expr);
-}
-
-/* ============================ 列宽拖拽 ============================ */
-
-function bindColumnResize() {
-  $("gridTable").addEventListener("mousedown", (ev) => {
-    const rz = ev.target.closest(".col-resizer");
-    if (!rz) return;
-    ev.preventDefault();
-    ev.stopPropagation();
-    const col = +rz.dataset.col;
-    rz.classList.add("dragging");
-    const startX = ev.clientX;
-    const colEl = $("gridTable").querySelectorAll("colgroup col")[col];
-    const startW = colEl.getBoundingClientRect().width;
-    const onMove = (e2) => {
-      const w = Math.max(40, Math.min(400, Math.round(startW + e2.clientX - startX)));
-      state.colW[col] = w;
-      colEl.style.width = w + "px";
-    };
-    const onUp = () => {
-      rz.classList.remove("dragging");
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  });
-}
-
-/* ============================ 功能区选项卡 ============================ */
-
-function bindRibbonTabs() {
-  for (const tab of document.querySelectorAll(".rtab")) {
-    tab.onclick = () => {
-      for (const t of document.querySelectorAll(".rtab")) {
-        t.classList.toggle("active", t === tab);
-        t.setAttribute("aria-selected", t === tab ? "true" : "false");
-      }
-      for (const p of document.querySelectorAll(".rpanel")) {
-        p.classList.toggle("active", p.dataset.panel === tab.dataset.tab);
-      }
-    };
-  }
-}
-
-function refreshRibbonState() {
-  updateBoldButton();
-  $("fontColorUnderline").style.background = state.fontColor;
-  $("fillColorUnderline").style.background = state.fillColor;
-}
-
-/* ============================ 抽屉:历史 / 节点 / 快照 ============================ */
+/* ============================ 抽屉(历史/节点/快照) ============================ */
 
 function openDrawer(title, render) {
   $("drawerTitle").textContent = title;
@@ -825,7 +436,7 @@ function showPeers() {
     if (state.peers.length === 0) {
       const empty = document.createElement("div");
       empty.className = "drawer-empty";
-      empty.textContent = "尚未发现其他节点。在局域网另一台机器(或另开端口)运行 meshsexcel-node,会自动出现在这里。";
+      empty.textContent = "尚未发现其他节点。局域网内其他机器运行 meshsexcel-node 后会自动出现在这里。";
       body.appendChild(empty);
       return;
     }
@@ -862,7 +473,7 @@ function showSnapshots() {
     if (snaps.length === 0) {
       const empty = document.createElement("div");
       empty.className = "drawer-empty";
-      empty.textContent = "还没有快照。快照会保存整簿内容,可随时恢复到该时点。";
+      empty.textContent = "还没有快照。快照保存整簿内容,可随时恢复。";
       body.appendChild(empty);
       return;
     }
@@ -880,8 +491,7 @@ function showSnapshots() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ snapshot_id: s.snapshot_id }),
-        }).then(() => { toast("已恢复", "ok"); return pollForce(); })
-          .then(() => renderAll())
+        }).then(() => { toast("已恢复", "ok"); return loadDoc(state.docId); })
           .catch((e) => toast("恢复失败:" + e.message, "err"));
       };
       body.appendChild(item);
@@ -909,8 +519,7 @@ function openDialog({ title, desc, fields, onSubmit }) {
   });
   dlg.querySelector("#dg-cancel").onclick = () => dlg.close();
   dlg.querySelector("#dg-cancel").classList.add("ghost");
-  const form = dlg.querySelector("form");
-  form.onsubmit = async (ev) => {
+  dlg.querySelector("form").onsubmit = async (ev) => {
     ev.preventDefault();
     const values = fields.map((_, i) => dlg.querySelector(`#dg-f${i}`).value.trim());
     for (let i = 0; i < fields.length; i++) {
@@ -951,284 +560,20 @@ function newDocDialog() {
   });
 }
 
-function addSheetDialog() {
-  openDialog({
-    title: "新增工作表",
-    fields: [{ placeholder: "表名,如:汇总", validate: (v) => (v ? "" : "表名不能为空") }],
-    onSubmit: async ([name]) => {
-      if (state.grid.sheets.find((s) => s.name === name)) throw new Error("表名已存在");
-      await api(`/v1/documents/${state.docId}/ops`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify([{ stamp: { ts: 0, author: "" }, type: "add_sheet", sheet: name, position: null }]),
-      });
-      await pollForce();
-      state.sheet = name;
-      renderAll();
-    },
-  });
-}
-
-async function removeSheet(name) {
-  if (!confirm(`删除工作表「${name}」及其全部内容?(作为新变更上链)`)) return;
-  await api(`/v1/documents/${state.docId}/ops`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify([{ stamp: { ts: 0, author: "" }, type: "remove_sheet", sheet: name }]),
-  });
-  await pollForce();
-  if (state.sheet === name) state.sheet = state.grid.sheets.find((s) => s.name !== name)?.name || null;
-  renderAll();
-}
-
-/* ============================ 文档生命周期 / 导入导出 ============================ */
-
-async function loadDoc(docId) {
-  state.docId = docId;
-  state.sel = null;
-  state.pending.clear();
-  location.hash = docId ? "#doc=" + docId : "";
-  if (!docId) { state.grid = null; renderAll(); return; }
-  const grid = await apiJson(`/v1/documents/${docId}/cells`);
-  state.grid = grid;
-  state.sheet = grid.sheets[0] ? grid.sheets[0].name : null;
-  renderAll();
-  poll();
-}
-
-async function refreshDocList() {
-  state.docs = await apiJson("/v1/documents");
-  if (!state.docId && state.docs.length > 0) {
-    await loadDoc(state.docs[state.docs.length - 1].id);
-  } else if (state.docId && !state.docs.find((d) => d.id === state.docId)) {
-    await loadDoc(null);
-  }
-}
-
-function download(path) {
-  const a = document.createElement("a");
-  a.href = path;
-  a.download = "";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-
-async function importFile(file) {
-  const isCsv = /\.csv$/i.test(file.name);
-  const url = `/v1/documents/${state.docId}/import/${isCsv ? "csv" : "xlsx"}` +
-    (isCsv ? `?sheet=${encodeURIComponent(file.name.replace(/\.csv$/i, ""))}` : "");
-  await api(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/octet-stream" },
-    body: isCsv ? await file.text() : await file.arrayBuffer(),
-  });
-  await pollForce();
-  renderAll();
-  toast(`已导入 ${file.name}`, "ok");
-}
-
-/* ============================ 键盘 ============================ */
-
-function onGridKeydown(ev) {
-  if (!state.docId) return;
-  if (state.editing) return; // 编辑态由编辑框自身处理
-  const has = !!state.sel;
-  switch (ev.key) {
-    case "ArrowUp": moveSel(-1, 0, ev.shiftKey); ev.preventDefault(); return;
-    case "ArrowDown": moveSel(1, 0, ev.shiftKey); ev.preventDefault(); return;
-    case "ArrowLeft": moveSel(0, -1, ev.shiftKey); ev.preventDefault(); return;
-    case "ArrowRight": moveSel(0, 1, ev.shiftKey); ev.preventDefault(); return;
-    case "Tab": moveSel(0, ev.shiftKey ? -1 : 1); ev.preventDefault(); return;
-    case "Enter":
-      if (has) openEditor();
-      ev.preventDefault();
-      return;
-    case "F2":
-      if (has) openEditor();
-      ev.preventDefault();
-      return;
-    case "Delete":
-    case "Backspace":
-      clearContents();
-      ev.preventDefault();
-      return;
-    case "b": case "B":
-      if (ev.ctrlKey || ev.metaKey) { applyStyleToSelection({ bold: true }); ev.preventDefault(); }
-      return;
-    case "c": case "C":
-      if (ev.ctrlKey || ev.metaKey) { copySelection(); ev.preventDefault(); }
-      return;
-    case "v": case "V":
-      if (ev.ctrlKey || ev.metaKey) { pasteClipboard(); ev.preventDefault(); }
-      return;
-    case "x": case "X":
-      if (ev.ctrlKey || ev.metaKey) { copySelection(); clearContents(); ev.preventDefault(); }
-      return;
-    default:
-      if (has && ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
-        openEditor(ev.key);
-        ev.preventDefault();
-      }
-  }
-}
-
-/* ============================ 事件绑定 ============================ */
+/* ============================ 启动 ============================ */
 
 function bindEvents() {
-  bindRibbonTabs();
-  bindColumnResize();
-
-  // 文档
+  window.addEventListener("message", onSheetMessage);
+  $("docSel").onchange = (ev) => loadDoc(ev.target.value || null);
   $("newDocBtn").onclick = newDocDialog;
   $("emptyNewBtn").onclick = newDocDialog;
-  $("addSheetBtn").onclick = addSheetDialog;
-  $("addSheetQuick").onclick = addSheetDialog;
   $("historyBtn").onclick = showHistory;
   $("peersBtn").onclick = showPeers;
   $("snapshotBtn").onclick = showSnapshots;
   $("drawerClose").onclick = closeDrawer;
   $("drawerBackdrop").onclick = closeDrawer;
-
-  // 导入导出
-  $("exportXlsxBtn").onclick = () => download(`/v1/documents/${state.docId}/export/xlsx`);
-  $("exportCsvBtn").onclick = () => download(`/v1/documents/${state.docId}/export/csv`);
-  const pickFile = () => $("fileInput").click();
-  $("importXlsxBtn").onclick = pickFile;
-  $("importCsvBtn").onclick = pickFile;
-  $("fileInput").onchange = async (ev) => {
-    const file = ev.target.files[0];
-    if (!file) return;
-    try { await importFile(file); } catch (e) { toast("导入失败:" + e.message, "err"); }
-    ev.target.value = "";
-  };
-
-  // 编辑栏
-  const input = $("formulaInput");
-  input.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter") {
-      closeEditor(true, "down");
-      $("gridWrap").focus();
-      ev.preventDefault();
-    } else if (ev.key === "Tab") {
-      closeEditor(true, ev.shiftKey ? "left" : "right");
-      $("gridWrap").focus();
-      ev.preventDefault();
-    } else if (ev.key === "Escape") {
-      closeEditor(false);
-      syncFormulaBar();
-      $("gridWrap").focus();
-      ev.preventDefault();
-    }
-  });
-  input.addEventListener("input", () => {
-    // 编辑栏直接改值(未开内联编辑器时):写入锚点
-    if (!state.editing && state.sel) {
-      openEditor(input.value);
-    } else if (state.editing) {
-      $("cellEditor").value = input.value;
-    }
-  });
-
-  // 单元格内编辑框
-  const ed = $("cellEditor");
-  ed.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter") {
-      closeEditor(true, "down");
-      $("gridWrap").focus();
-      ev.preventDefault();
-    } else if (ev.key === "Tab") {
-      closeEditor(true, ev.shiftKey ? "left" : "right");
-      $("gridWrap").focus();
-      ev.preventDefault();
-    } else if (ev.key === "Escape") {
-      closeEditor(false);
-      syncFormulaBar();
-      $("gridWrap").focus();
-      ev.preventDefault();
-    }
-  });
-  ed.addEventListener("input", () => { $("formulaInput").value = ed.value; });
-
-  // 名称框:输入 A1 / A1:B3 回车跳转
-  $("nameBox").addEventListener("keydown", (ev) => {
-    if (ev.key !== "Enter") return;
-    const v = $("nameBox").value.trim();
-    const single = parseA1(v);
-    if (single) { setSelection(single.row, single.col); scrollSelIntoView(); $("gridWrap").focus(); return; }
-    const m = /^([A-Za-z]\d*):([A-Za-z]\d*)$/.exec(v.replace(/\s/g, ""));
-    if (m) {
-      const p1 = parseA1(m[1]), p2 = parseA1(m[2]);
-      if (p1 && p2) { setSelection(p1.row, p1.col, p2.row, p2.col); scrollSelIntoView(); $("gridWrap").focus(); return; }
-    }
-    syncFormulaBar();
-  });
-
-  // 网格键盘
-  $("gridWrap").addEventListener("keydown", onGridKeydown);
-
-  // 样式按钮
-  $("boldBtn").onclick = () => applyStyleToSelection({ bold: true });
-  $("alignLeftBtn").onclick = () => applyStyleToSelection({ align: "left" });
-  $("alignCenterBtn").onclick = () => applyStyleToSelection({ align: "center" });
-  $("alignRightBtn").onclick = () => applyStyleToSelection({ align: "right" });
-  $("fontColorBtn").onclick = () => showColorPop($("fontColorBtn"), FONT_COLORS, (c) => {
-    state.fontColor = c || "#e03131";
-    applyStyleToSelection({ color: c });
-  });
-  $("fillColorBtn").onclick = () => showColorPop($("fillColorBtn"), FILL_COLORS, (c) => {
-    state.fillColor = c || "#fff3bf";
-    applyStyleToSelection({ bg: c });
-  }, true);
-  $("clearContentsBtn").onclick = clearContents;
-  $("copyBtn").onclick = copySelection;
-  $("pasteBtn").onclick = pasteClipboard;
-  $("autoSumBtn").onclick = () => insertFunction("SUM");
-
-  // 公式函数按钮
-  for (const b of document.querySelectorAll("[data-fn]")) {
-    b.onclick = () => insertFunction(b.dataset.fn);
-  }
-  $("funcHelpBtn").onclick = () => openDrawer("支持的函数", (body) => {
-    body.innerHTML = `<div class="list-item"><div class="li-title">SUM / AVERAGE / MIN / MAX / COUNT / COUNTA</div>
-      <div class="li-sub">区域聚合,如 =SUM(B2:B9)</div></div>
-      <div class="list-item"><div class="li-title">IF / AND / OR / NOT</div>
-      <div class="li-sub">逻辑判断,如 =IF(A1&gt;60,"合格","不合格")</div></div>
-      <div class="list-item"><div class="li-title">ABS / ROUND / CONCAT</div>
-      <div class="li-sub">数值与文本,如 =ROUND(A2,2)</div></div>
-      <div class="list-item"><div class="li-title">运算符</div>
-      <div class="li-sub">+ - * / ^ % &amp;(连接)= &lt;&gt; &lt; &gt; &lt;= &gt;=</div></div>
-      <div class="list-item"><div class="li-title">单元格引用</div>
-      <div class="li-sub">A1、$A$1、Sheet2!B3、A1:C9(跨表引用表名区分大小写)</div></div>`;
-  });
-
-  // 视图
-  $("showFormulaChk").onchange = (ev) => {
-    state.showFormula = ev.target.checked;
-    renderGrid();
-    updateSelectionUI();
-  };
-  const applyZoom = (z) => {
-    state.zoom = Math.min(1.5, Math.max(0.8, z));
-    $("gridHost").style.zoom = state.zoom;
-    $("zoomVal").textContent = Math.round(state.zoom * 100) + "%";
-    $("zoomSel").value = String(state.zoom);
-  };
-  $("zoomSel").onchange = (ev) => applyZoom(parseFloat(ev.target.value));
-  $("zoomIn").onclick = () => applyZoom(state.zoom + 0.1);
-  $("zoomOut").onclick = () => applyZoom(state.zoom - 0.1);
-
-  // 全局:关闭浮层 / 菜单
-  document.addEventListener("mousedown", (ev) => {
-    if (!ev.target.closest(".ctx-menu")) hideCtxMenu();
-    if (!ev.target.closest(".color-pop") && !ev.target.closest(".dd-btn")) hideColorPop();
-  });
-  document.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape") { hideCtxMenu(); hideColorPop(); }
-  });
+  document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeDrawer(); });
 }
-
-/* ============================ 启动 ============================ */
 
 async function boot() {
   bindEvents();
@@ -1245,9 +590,8 @@ async function boot() {
   } catch (e) {
     toast("文档加载失败:" + e.message, "err");
   }
-  renderAll();
   markSync();
-  setInterval(poll, 2500);
+  state.syncTimer = setInterval(pollRemote, 2500);
   setInterval(pollPeers, 5000);
   pollPeers();
 }

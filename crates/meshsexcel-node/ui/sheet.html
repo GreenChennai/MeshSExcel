@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>MeshSExcel Sheet Host</title>
+<link rel="stylesheet" href="/vendor/luckysheet/plugins/css/pluginsCss.css">
+<link rel="stylesheet" href="/vendor/luckysheet/plugins/plugins.css">
+<link rel="stylesheet" href="/vendor/luckysheet/css/luckysheet.css">
+<link rel="stylesheet" href="/vendor/luckysheet/assets/iconfont/iconfont.css">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  #lucky { position: absolute; inset: 0; }
+</style>
+</head>
+<body>
+<div id="lucky"></div>
+<script src="/vendor/luckysheet/plugins/js/plugin.js"></script>
+<script src="/vendor/luckysheet/luckysheet.umd.js"></script>
+<script>
+"use strict";
+/* Luckysheet 宿主页:与父页面(app.js)用 postMessage 通信。
+ * 独立 iframe 隔离了 Luckysheet 的全局状态,父页面的脚本环境不再干扰它。 */
+
+let diffTimer = null;
+
+function notifyChanged() {
+  clearTimeout(diffTimer);
+  diffTimer = setTimeout(() => {
+    try {
+      parent.postMessage({ type: "changed", sheets: luckysheet.getAllSheets() }, "*");
+    } catch (e) { /* 序列化失败忽略本轮 */ }
+  }, 400);
+}
+
+window.addEventListener("message", (ev) => {
+  const msg = ev.data || {};
+  if (ev.source !== window.parent) return;
+  if (msg.type === "load") {
+    const host = document.getElementById("lucky");
+    host.innerHTML = "";
+    try {
+      luckysheet.create({
+        container: "lucky",
+        title: msg.title || "表格",
+        lang: "zh",
+        showinfobar: false,
+        showstatisticBar: true,
+        showsheetbar: true,
+        data: msg.data,
+        hook: {
+          updated: notifyChanged,
+          cellUpdated: notifyChanged,
+          sheetCreateAfter: notifyChanged,
+          sheetDeleteAfter: notifyChanged,
+          sheetEditAfter: notifyChanged,
+        },
+      });
+      parent.postMessage({ type: "ready" }, "*");
+    } catch (e) {
+      parent.postMessage({ type: "create-error", message: String(e && e.message || e) }, "*");
+    }
+  }
+});
+</script>
+</body>
+</html>
