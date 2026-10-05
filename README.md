@@ -1,5 +1,7 @@
 # MeshSExcel
 
+[![CI](https://github.com/GreenChennai/MeshSExcel/actions/workflows/ci.yml/badge.svg)](https://github.com/GreenChennai/MeshSExcel/actions/workflows/ci.yml)
+
 MeshSExcel 是一个面向局域网内企业协作的在线办公表格软件,聚焦在:
 
 - 局域网 P2P 同步(mDNS 自动发现 + gossipsub 广播)
@@ -8,6 +10,12 @@ MeshSExcel 是一个面向局域网内企业协作的在线办公表格软件,�
 - 公式计算(SUM/AVERAGE/IF 等,依赖图增量重算)
 - XLSX / CSV 导入导出(公式写成真公式,WPS / Excel 可直接重算)
 - 单二进制交付:REST API + 内嵌 Web UI + SQLite 存档
+
+![MeshSExcel 界面](docs/screenshot-main.png)
+
+界面参照 LibreOffice Calc / WPS 表格:Ribbon 功能区(开始/插入/公式/数据/视图)、
+名称框 + 编辑栏、行列表头、区域选择与状态栏统计(计数/求和/平均)、单元格内编辑、
+右键菜单、列宽拖拽、字体/填充颜色、自动求和、缩放、工作表标签(右键管理)。
 
 ## 当前实现状态(2026-10)
 
@@ -59,12 +67,27 @@ cargo run -p meshsexcel-poc-b -- --node-id alice --db-dir ./tmp/alice --port 200
 实现 `spec/openapi.yaml` 全部端点,另有供 Web UI 使用的扩展端点(cells 网格、
 ops 批量提交、快照、导入),详见 `spec/README.md`。
 
-## 开发
+## 开发与构建
 
 ```bash
 cargo test --workspace      # 单元 + API 集成测试
 cargo clippy --all-targets -- -D warnings
 cargo build --release       # 产物:target/release/meshsexcel-node.exe
+```
+
+## GitHub 构建(CI / 发布)
+
+- **CI**(`.github/workflows/ci.yml`):每次 push / PR 自动跑
+  fmt + clippy + 全量测试(ubuntu),并在 Windows 上构建 +
+  启动冒烟,产物(`meshsexcel-node.exe` / `meshsexcel-poc-b.exe`)
+  上传为 Actions Artifacts。
+- **发布**(`.github/workflows/release.yml`):推送 `v*` 标签触发,
+  Windows release 构建 + 冒烟 + 打包 zip,自动创建 GitHub Release。
+
+发布一个版本:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
 ## 目录

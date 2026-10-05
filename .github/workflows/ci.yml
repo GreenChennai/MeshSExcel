@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: 测试与静态检查 (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --workspace
+
+  build-windows:
+    name: Windows 构建
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --release
+        run: cargo build --release -p meshsexcel-node -p meshsexcel-poc-b
+      - name: 冒烟(meshsexcel-node 能启动并响应)
+        run: |
+          Start-Process -FilePath "target\release\meshsexcel-node.exe" -ArgumentList "--node-id","ci","--db-dir","$env:TEMP\mesh-ci","--http-port","18443","--p2p-port","22001"
+          Start-Sleep -Seconds 5
+          $info = Invoke-RestMethod -Uri "http://localhost:18443/v1/node/info"
+          Write-Output "node info: $($info | ConvertTo-Json -Compress)"
+          if ($info.node_id -ne "ci") { throw "node did not boot correctly" }
+          Stop-Process -Name "meshsexcel-node" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meshsexcel-windows
+          path: |
+            target/release/meshsexcel-node.exe
+            target/release/meshsexcel-poc-b.exe
+          retention-days: 14
