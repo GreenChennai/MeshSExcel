@@ -1,14 +1,18 @@
 [package]
-name = "meshsexcel-poc-b"
-description = "PoC B:Rust 多节点局域网 gossip / block demo(libp2p + mDNS + gossipsub + SQLite)"
+name = "meshsexcel-node"
+description = "MeshSExcel 局域网表格节点:REST API + libp2p 同步 + 内嵌 Web UI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[[bin]]
+name = "meshsexcel-node"
+path = "src/main.rs"
+
 [dependencies]
-meshsexcel-core = { path = "../crates/meshsexcel-core" }
-meshsexcel-net = { path = "../crates/meshsexcel-net" }
+meshsexcel-core = { path = "../meshsexcel-core" }
+meshsexcel-net = { path = "../meshsexcel-net" }
 tokio = { workspace = true }
 futures = { workspace = true }
 anyhow = { workspace = true }
@@ -20,4 +24,8 @@ rand = { workspace = true }
 hex = { workspace = true }
 libp2p = { workspace = true }
 clap = { workspace = true }
-rusqlite = { workspace = true }
+axum = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tower = { version = "0.4", features = ["util"] }

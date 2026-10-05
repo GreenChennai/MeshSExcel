@@ -1,25 +1,9 @@
-mod block;
-mod config;
-mod db;
-mod network;
-mod node;
-
-use anyhow::Result;
-use config::Config;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cfg = Config::parse_args();
-
-    let mut node = node::LocalNode::new(&cfg.node_id, &cfg.db_dir, cfg.port).await?;
-    println!("[{}] node started; db={}, port={}", node.node_id, cfg.db_dir, cfg.port);
-    println!(
-        "[{}] stored blocks count: {}",
-        node.node_id,
-        node.store.count_blocks("sheet-demo")?
-    );
-
-    node.run().await?;
-    Ok(())
-}
-
+/target
+poc-b-rust/tmp/
+*.db
+*.db-wal
+*.db-shm
+node_modules/
+dist/
+__pycache__/
+.DS_Store

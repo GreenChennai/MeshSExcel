@@ -1,20 +1,6 @@
-use clap::Parser;
+//! block 模型与签名校验:实现统一放在 `meshsexcel-core`,这里薄再导出,
+//! 保证 PoC 与正式节点使用完全一致的 block 语义。
 
-#[derive(Debug, Parser)]
-#[command(author, version, about = "MeshSExcel PoC B")]
-pub struct Config {
-    #[arg(long)]
-    pub node_id: String,
-
-    #[arg(long)]
-    pub db_dir: String,
-
-    #[arg(long, default_value_t = 20001)]
-    pub port: u16,
-}
-
-impl Config {
-    pub fn parse_args() -> Self {
-        Self::parse()
-    }
-}
+// PoC 是二进制 crate,再导出未被 main 直接用到时会有 unused 告警
+#[allow(unused_imports)]
+pub use meshsexcel_core::block::{Block, BlockHeader, BlockPayload};

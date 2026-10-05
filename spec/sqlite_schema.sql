@@ -1,47 +1,46 @@
-syntax = "proto3";
-package lansheet;
+CREATE TABLE documents (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  owner TEXT,
+  head_block TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 
-import "google/protobuf/timestamp.proto";
+CREATE TABLE blocks (
+  block_hash TEXT PRIMARY KEY,
+  doc_id TEXT NOT NULL,
+  prev_hash TEXT,
+  author TEXT,
+  author_pubkey TEXT,
+  timestamp DATETIME,
+  payload BLOB,
+  merkle_root TEXT,
+  signature BLOB,
+  FOREIGN KEY(doc_id) REFERENCES documents(id)
+);
 
-message PeerInfo {
-  string id = 1;
-  string addr = 2;
-  google.protobuf.Timestamp last_seen = 3;
-  string pubkey = 4;
-}
+CREATE TABLE snapshots (
+  snapshot_id TEXT PRIMARY KEY,
+  doc_id TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  snapshot_blob BLOB,
+  description TEXT
+);
 
-message BlockHeader {
-  string doc_id = 1;
-  string prev_hash = 2;
-  string author = 3;
-  string author_pubkey = 4;
-  google.protobuf.Timestamp timestamp = 5;
-  uint32 version = 6;
-}
+CREATE TABLE peers (
+  peer_id TEXT PRIMARY KEY,
+  addr TEXT,
+  pubkey TEXT,
+  last_seen DATETIME
+);
 
-message BlockPayload {
-  bytes crdt_update = 1;
-  repeated bytes ops = 2;
-  string client_id = 3;
-}
-
-message Block {
-  BlockHeader header = 1;
-  BlockPayload payload = 2;
-  bytes merkle_root = 3;
-  bytes signature = 4;
-}
-
-message BlockRequest {
-  string doc_id = 1;
-  string since_hash = 2;
-}
-
-message BlockStream {
-  oneof event {
-    Block block = 1;
-    PeerInfo peer = 2;
-  }
-}
-
-
+CREATE TABLE cells_cache (
+  doc_id TEXT,
+  sheet TEXT,
+  row INTEGER,
+  col INTEGER,
+  value TEXT,
+  formula TEXT,
+  style TEXT,
+  PRIMARY KEY(doc_id, sheet, row, col)
+);

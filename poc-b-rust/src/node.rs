@@ -1,96 +1,135 @@
+//! PoC B 节点生命周期:每 5 秒产出一个演示 block,签名后本地入库并广播;
+//! 同时接收 gossip 到来的 block,验签后入库。
+
 use anyhow::Result;
-use libp2p::{
-    gossipsub::{self, IdentTopic, MessageAuthenticity},
-    mdns, noise, swarm::NetworkBehaviour, tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
-};
+use chrono::Utc;
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use meshsexcel_core::Block;
+use std::path::Path;
 use std::time::Duration;
+use tokio::time;
 
-#[derive(NetworkBehaviour)]
-pub struct AppBehaviour {
-    pub gossipsub: gossipsub::Behaviour,
-    pub mdns: mdns::tokio::Behaviour,
-}
+use crate::db::BlockStore;
+use crate::network::{NetEvent, NetworkConfig, NetworkNode};
 
-#[derive(Debug, Clone)]
-pub struct NetworkConfig {
+pub struct LocalNode {
     pub node_id: String,
-    pub listen_addr: Multiaddr,
-    pub topic: String,
+    pub signing_key: SigningKey,
+    pub verifying_key: VerifyingKey,
+    pub store: BlockStore,
+    pub network: NetworkNode,
+    pub current_head: Option<String>,
 }
 
-pub struct NetworkNode {
-    pub swarm: Swarm<AppBehaviour>,
-    pub topic: IdentTopic,
-    pub node_id: String,
-}
+impl LocalNode {
+    pub async fn new(node_id: &str, db_dir: &str, port: u16) -> Result<Self> {
+        let db_path = Path::new(db_dir);
+        if !db_path.exists() {
+            std::fs::create_dir_all(db_path)?;
+        }
 
-impl NetworkNode {
-    pub async fn new(cfg: NetworkConfig) -> Result<Self> {
-        let id_keys = libp2p::identity::Keypair::generate_ed25519();
-        let local_peer_id = PeerId::from(id_keys.public());
+        let store = BlockStore::open(db_path)?;
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let verifying_key = signing_key.verifying_key();
 
-        let gossipsub_config = gossipsub::ConfigBuilder::default()
-            .validation_mode(gossipsub::ValidationMode::Strict)
-            .heartbeat_interval(Duration::from_secs(10))
-            .build()
-            .expect("valid config");
+        let network = NetworkNode::new(NetworkConfig {
+            node_id: node_id.to_string(),
+            listen_addr: format!("/ip4/0.0.0.0/tcp/{port}/").parse()?,
+            topic: "lansheet-demo".to_string(),
+            on_discovered: None,
+        })?;
 
-        let swarm = SwarmBuilder::with_async_std_executor(
-            tcp::async_io::Transport::default()
-                .upgrade(libp2p::core::upgrade::Version::V1Lazy)
-                .authenticate(noise::Config::new(&id_keys)?)
-                .multiplex(yamux::Config::default())
-                .boxed(),
-            AppBehaviour {
-                gossipsub: gossipsub::Behaviour::new(
-                    MessageAuthenticity::Signed(id_keys.clone()),
-                    gossipsub_config,
-                )?,
-                mdns: mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?,
-            },
-            local_peer_id,
-        )
-        .build();
+        let current_head = store.latest_block("sheet-demo")?.map(|b| b.hash_key());
 
-        let topic = gossipsub::IdentTopic::new(cfg.topic.clone());
-        let mut swarm = swarm;
-        swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
-        swarm.listen_on(cfg.listen_addr.clone())?;
-
-        Ok(Self {
-            swarm,
-            topic,
-            node_id: cfg.node_id,
-        })
+        let node = Self {
+            node_id: node_id.to_string(),
+            signing_key,
+            verifying_key,
+            store,
+            network,
+            current_head,
+        };
+        println!(
+            "[{}] identity ed25519:{}",
+            node.node_id,
+            hex::encode(node.verifying_key.to_bytes())
+        );
+        Ok(node)
     }
 
-    pub async fn next_event(&mut self) -> Result<Vec<u8>> {
+    pub async fn run(&mut self) -> Result<()> {
+        let mut interval = time::interval(Duration::from_secs(5));
+
         loop {
-            match self.swarm.select_next_some().await {
-                libp2p::swarm::SwarmEvent::Behaviour(libp2p::swarm::dummy::BehaviourEvent::Gossipsub(
-                    gossipsub::Event::Message { message, .. },
-                )) => {
-                    return Ok(message.data);
+            tokio::select! {
+                _ = interval.tick() => {
+                    let block = self.make_block();
+                    self.handle_incoming_block(&block)?;
+                    println!("[{}] generated block hash: {}", self.node_id, block.hash_key());
+                    self.network.publish_block(&serde_json::to_vec(&block)?).await?;
+                    self.current_head = Some(block.hash_key());
                 }
-                libp2p::swarm::SwarmEvent::Behaviour(libp2p::swarm::dummy::BehaviourEvent::Mdns(
-                    mdns::Event::Discovered(list),
-                )) => {
-                    for (peer_id, multiaddr) in list {
-                        self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                        self.swarm.connect_peer_id(&peer_id);
-                        println!("[{}] discovered peer {} at {}", self.node_id, peer_id, multiaddr);
+                maybe_event = self.network.next_event() => {
+                    match maybe_event {
+                        Ok(NetEvent::Block(bytes)) => {
+                            let parsed: Block = match serde_json::from_slice(&bytes) {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    eprintln!("[{}] invalid block json: {}", self.node_id, err);
+                                    continue;
+                                }
+                            };
+
+                            if !parsed.verify() {
+                                eprintln!("[{}] invalid block signature", self.node_id);
+                                continue;
+                            }
+
+                            let hash = parsed.hash_key();
+                            if self.store.contains(&parsed.header.doc_id, &hash)? {
+                                println!("[{}] duplicate block ignored: {}", self.node_id, hash);
+                                continue;
+                            }
+
+                            println!(
+                                "[{}] received valid block {} from {}",
+                                self.node_id, hash, parsed.header.author
+                            );
+                            self.store.put_block(&parsed)?;
+                        }
+                        // PoC 每 5 秒产新块,无需 mesh 成形补发
+                        Ok(NetEvent::MeshReady) => {}
+                        Err(err) => eprintln!("[{}] network event error: {}", self.node_id, err),
                     }
                 }
-                _ => {}
             }
         }
     }
 
-    pub async fn publish_block(&mut self, block_json: &[u8]) -> Result<()> {
-        self.swarm
-            .behaviour_mut()
-            .gossipsub
-            .publish(self.topic.clone(), block_json.to_vec())?;
+    fn handle_incoming_block(&mut self, block: &Block) -> Result<()> {
+        if !block.verify() {
+            anyhow::bail!("block verify failed");
+        }
+        self.store.put_block(block)?;
         Ok(())
+    }
+
+    fn make_block(&mut self) -> Block {
+        let doc_id = "sheet-demo";
+        let prev_hash = self.current_head.clone();
+        let ops = vec![meshsexcel_core::CellOp::new(
+            Utc::now().timestamp_millis(),
+            self.node_id.clone(),
+            meshsexcel_core::OpKind::SetCell {
+                sheet: "sheet-demo".into(),
+                row: 1,
+                col: 1,
+                value: Some(format!("demo-update-{}", Utc::now().timestamp_millis())),
+                formula: None,
+                style: None,
+            },
+        )];
+
+        Block::from_ops(doc_id, prev_hash, &self.node_id, &self.signing_key, &ops)
     }
 }

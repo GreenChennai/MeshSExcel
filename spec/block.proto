@@ -1,0 +1,45 @@
+syntax = "proto3";
+package lansheet;
+
+import "google/protobuf/timestamp.proto";
+
+message PeerInfo {
+  string id = 1;
+  string addr = 2;
+  google.protobuf.Timestamp last_seen = 3;
+  string pubkey = 4;
+}
+
+message BlockHeader {
+  string doc_id = 1;
+  string prev_hash = 2;
+  string author = 3;
+  string author_pubkey = 4;
+  google.protobuf.Timestamp timestamp = 5;
+  uint32 version = 6;
+}
+
+message BlockPayload {
+  bytes crdt_update = 1;
+  repeated bytes ops = 2;
+  string client_id = 3;
+}
+
+message Block {
+  BlockHeader header = 1;
+  BlockPayload payload = 2;
+  bytes merkle_root = 3;
+  bytes signature = 4;
+}
+
+message BlockRequest {
+  string doc_id = 1;
+  string since_hash = 2;
+}
+
+message BlockStream {
+  oneof event {
+    Block block = 1;
+    PeerInfo peer = 2;
+  }
+}

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeshSExcel · 局域网协同表格</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%230f766e' stroke-width='2'%3E%3Crect x='3' y='3' width='18' height='18' rx='2'/%3E%3Cpath d='M3 9h18M3 15h18M9 3v18'/%3E%3C/svg%3E">
+</head>
+<body>
+<div id="app" class="app">
+
+  <!-- 顶栏 -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="brand" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>
+      </span>
+      <span class="brand-name">MeshSExcel</span>
+      <span class="doc-name" id="docName">未打开文档</span>
+    </div>
+    <div class="topbar-right">
+      <span class="chip" id="nodeChip" title="本节点身份">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+        <span id="nodeIdText">—</span>
+      </span>
+      <button class="btn btn-ghost" id="peersBtn" aria-label="查看局域网节点">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6"/><circle cx="17.5" cy="9.5" r="2.5"/><path d="M16 14.2c2.9.3 5.5 2.3 5.5 5.3"/></svg>
+        <span id="peersCount">0 节点</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- 工具行 -->
+  <div class="toolbar" role="toolbar" aria-label="文档操作">
+    <div class="toolbar-group" id="editTools">
+      <button class="btn btn-ghost btn-icon" id="boldBtn" aria-label="加粗" title="加粗 (Ctrl+B)" disabled>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M7 5h6a3.5 3.5 0 0 1 0 7H7zM7 12h7a3.5 3.5 0 0 1 0 7H7z"/></svg>
+      </button>
+      <button class="btn btn-ghost btn-icon hl-btn" id="hlBtn" aria-label="黄色高亮" title="高亮" disabled>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M9 15l-4.3 4.3M12.5 3.5l6 6L11 17H7v-4z"/></svg>
+      </button>
+      <button class="btn btn-ghost btn-icon" id="alignBtn" aria-label="居中对齐" title="居中" disabled>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M8 12h8M4 18h16"/></svg>
+      </button>
+      <span class="toolbar-sep" aria-hidden="true"></span>
+      <button class="btn btn-ghost" id="clearBtn" disabled>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6.5 7l1 13h9l1-13"/></svg>
+        清除
+      </button>
+    </div>
+    <span class="toolbar-sep" aria-hidden="true"></span>
+    <div class="toolbar-group">
+      <button class="btn" id="newDocBtn">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        新建文档
+      </button>
+      <button class="btn btn-ghost" id="importBtn" disabled>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg>
+        导入 XLSX / CSV
+      </button>
+      <button class="btn btn-ghost" id="exportXlsxBtn" disabled>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 15V3m0 12l-4-4m4 4l4-4M4 21h16"/></svg>
+        导出 XLSX
+      </button>
+      <button class="btn btn-ghost" id="exportCsvBtn" disabled>CSV</button>
+      <button class="btn btn-ghost" id="snapshotBtn" disabled>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 7h14l1.5 13h-17z"/><path d="M8 7a4 4 0 0 1 8 0"/></svg>
+        快照
+      </button>
+      <button class="btn btn-ghost" id="historyBtn" disabled>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+        审计历史
+      </button>
+    </div>
+    <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" hidden>
+  </div>
+
+  <!-- 公式栏 -->
+  <div class="formulabar">
+    <span class="cell-ref" id="cellRef">—</span>
+    <span class="fx" aria-hidden="true">fx</span>
+    <input id="formulaInput" type="text" autocomplete="off" spellcheck="false"
+           placeholder="输入内容或 = 公式(如 =SUM(A1:A9))" aria-label="编辑栏" disabled>
+  </div>
+
+  <!-- 网格 -->
+  <main class="grid-wrap" id="gridWrap" tabindex="0" aria-label="表格编辑区">
+    <div id="emptyState" class="empty-state">
+      <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>
+      <h2>还没有文档</h2>
+      <p>新建一个工作簿,局域网内的其他 MeshSExcel 节点会自动发现并同步它。</p>
+      <button class="btn btn-primary" id="emptyNewBtn">新建第一个文档</button>
+    </div>
+    <div id="gridHost" class="grid-host" hidden>
+      <table class="grid" id="gridTable" role="grid"></table>
+    </div>
+  </main>
+
+  <!-- 表页标签 + 状态栏 -->
+  <div class="sheetbar">
+    <div class="sheet-tabs" id="sheetTabs" role="tablist" aria-label="工作表"></div>
+    <button class="btn btn-ghost btn-icon" id="addSheetBtn" aria-label="新增工作表" title="新增工作表" disabled>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <div class="statusbar">
+      <span class="status-item" id="saveStatus" aria-live="polite">就绪</span>
+      <span class="status-sep" aria-hidden="true">·</span>
+      <span class="status-item" id="syncTime">—</span>
+    </div>
+  </div>
+</div>
+
+<!-- 右侧抽屉:节点 / 历史 / 快照 -->
+<div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+<aside class="drawer" id="drawer" role="dialog" aria-label="面板" aria-modal="true" hidden>
+  <header class="drawer-head">
+    <h2 id="drawerTitle">面板</h2>
+    <button class="btn btn-ghost btn-icon" id="drawerClose" aria-label="关闭面板">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </header>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+
+<!-- 轻提示 -->
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

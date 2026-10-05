@@ -1,0 +1,12 @@
+[package]
+name = "meshsexcel-net"
+description = "MeshSExcel 网络栈:libp2p + mDNS + gossipsub 的节点间 block 广播"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+futures = { workspace = true }
+libp2p = { workspace = true }

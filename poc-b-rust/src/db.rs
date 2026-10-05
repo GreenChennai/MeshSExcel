@@ -1,110 +1,145 @@
-use chrono::{DateTime, Utc};
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+//! block 持久化:SQLite(`spec/sqlite_schema.sql` 的 blocks 表;
+//! 完整 block 以 JSON 存于 payload 列,其余列供 SQL 层检索)。
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockHeader {
-    pub doc_id: String,
-    pub prev_hash: Option<String>,
-    pub author: String,
-    pub author_pubkey: String,
-    pub timestamp: DateTime<Utc>,
-    pub version: u32,
+use crate::block::Block;
+use anyhow::Result;
+use rusqlite::{params, Connection, OptionalExtension};
+use std::path::Path;
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS blocks (
+  block_hash TEXT PRIMARY KEY,
+  doc_id TEXT NOT NULL,
+  prev_hash TEXT,
+  author TEXT,
+  author_pubkey TEXT,
+  timestamp DATETIME,
+  payload BLOB,
+  merkle_root TEXT,
+  signature BLOB
+);
+CREATE INDEX IF NOT EXISTS idx_blocks_doc ON blocks(doc_id, timestamp);
+";
+
+pub struct BlockStore {
+    conn: Connection,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockPayload {
-    pub crdt_update_b64: String,
-    pub operations: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Block {
-    pub header: BlockHeader,
-    pub payload: BlockPayload,
-    pub merkle_root: String,
-    pub signature: String,
-}
-
-impl Block {
-    pub fn new(
-        doc_id: &str,
-        prev_hash: Option<String>,
-        author: &str,
-        author_pubkey: &str,
-        crdt_update: &[u8],
-        operations: Vec<String>,
-        signing_key: &SigningKey,
-    ) -> Self {
-        let payload = BlockPayload {
-            crdt_update_b64: base64::encode(crdt_update),
-            operations,
-        };
-
-        let payload_json = serde_json::to_string(&payload).unwrap();
-        let payload_hash = Sha256::digest(payload_json.as_bytes());
-        let merkle_root = format!("{:x}", payload_hash);
-
-        let header = BlockHeader {
-            doc_id: doc_id.to_string(),
-            prev_hash,
-            author: author.to_string(),
-            author_pubkey: author_pubkey.to_string(),
-            timestamp: Utc::now(),
-            version: 1,
-        };
-
-        let serialized = serde_json::to_string(&(&header, &payload, &merkle_root)).unwrap();
-        let signature = signing_key.sign(serialized.as_bytes());
-        let signature_hex = hex::encode(signature.to_bytes());
-
-        Self {
-            header,
-            payload,
-            merkle_root,
-            signature: signature_hex,
-        }
+impl BlockStore {
+    pub fn open(db_dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(db_dir)?;
+        let conn = Connection::open(db_dir.join("blocks.db"))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;",
+        )?;
+        conn.execute_batch(SCHEMA)?;
+        Ok(Self { conn })
     }
 
-    pub fn hash_key(&self) -> String {
-        let hash_input = format!(
-            "{}:{}:{}:{}",
-            self.header.doc_id,
-            self.header.timestamp.to_rfc3339(),
-            self.merkle_root,
-            self.signature
+    /// 写入 block;重复 hash 静默忽略(gossip 天然重复)。
+    pub fn put_block(&self, block: &Block) -> Result<()> {
+        let json = serde_json::to_vec(block)?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO blocks
+             (block_hash, doc_id, prev_hash, author, author_pubkey, timestamp, payload, merkle_root, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                block.hash_key(),
+                block.header.doc_id,
+                block.header.prev_hash,
+                block.header.author,
+                block.header.author_pubkey,
+                block.header.timestamp.to_rfc3339(),
+                json,
+                block.merkle_root,
+                block.signature,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn contains(&self, doc_id: &str, hash: &str) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM blocks WHERE doc_id = ?1 AND block_hash = ?2",
+            params![doc_id, hash],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn count_blocks(&self, doc_id: &str) -> Result<i64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM blocks WHERE doc_id = ?1",
+            params![doc_id],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
+    /// 文档链头(重启后据此续链)。
+    pub fn latest_block(&self, doc_id: &str) -> Result<Option<Block>> {
+        let payload: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT payload FROM blocks WHERE doc_id = ?1
+                 ORDER BY timestamp DESC, block_hash DESC LIMIT 1",
+                params![doc_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(payload.as_deref().map(serde_json::from_slice).transpose()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+    use meshsexcel_core::ops::{CellOp, OpKind};
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("meshsexcel-pocb-{tag}-{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sample(author: &str, ts_note: &str) -> Block {
+        let key = SigningKey::from_bytes(&[11u8; 32]);
+        let op = CellOp::new(
+            1,
+            author,
+            OpKind::SetCell {
+                sheet: "sheet-demo".into(),
+                row: 1,
+                col: 1,
+                value: Some(ts_note.into()),
+                formula: None,
+                style: None,
+            },
         );
-        let digest = Sha256::digest(hash_input.as_bytes());
-        format!("{:x}", digest)
+        Block::from_ops("sheet-demo", None, author, &key, &[op])
     }
 
-    pub fn verify(&self) -> bool {
-        let Some(public_key) = self.header.author_pubkey.strip_prefix("ed25519:") else {
-            return false;
-        };
+    #[test]
+    fn put_latest_dedup() {
+        let dir = tmp_dir("put");
+        let store = BlockStore::open(&dir).unwrap();
+        assert_eq!(store.count_blocks("sheet-demo").unwrap(), 0);
+        assert!(store.latest_block("sheet-demo").unwrap().is_none());
 
-        let Ok(decoded) = hex::decode(public_key) else {
-            return false;
-        };
+        let b1 = sample("alice", "first");
+        let b2 = sample("alice", "second");
+        store.put_block(&b1).unwrap();
+        store.put_block(&b2).unwrap();
+        store.put_block(&b1).unwrap(); // 重复
 
-        let Ok(key_bytes) = <[u8; 32]>::try_from(decoded.as_slice()) else {
-            return false;
-        };
+        assert_eq!(store.count_blocks("sheet-demo").unwrap(), 2);
+        let latest = store.latest_block("sheet-demo").unwrap().unwrap();
+        assert!(latest.verify());
+        assert!(store.contains("sheet-demo", &b1.hash_key()).unwrap());
 
-        let Ok(public_key) = VerifyingKey::from_bytes(&key_bytes) else {
-            return false;
-        };
-
-        let Ok(sig_bytes) = hex::decode(&self.signature) else {
-            return false;
-        };
-
-        let Ok(sig) = ed25519_dalek::Signature::from_slice(&sig_bytes) else {
-            return false;
-        };
-
-        let serialized = serde_json::to_string(&(&self.header, &self.payload, &self.merkle_root)).unwrap();
-        public_key.verify(serialized.as_bytes(), &sig).is_ok()
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
