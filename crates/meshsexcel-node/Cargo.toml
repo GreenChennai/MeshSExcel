@@ -7,7 +7,8 @@ license.workspace = true
 authors.workspace = true
 
 [[bin]]
-name = "meshsexcel-node"
+# 注意:不叫 *node.exe——部分机器上存在按名管理 node.exe 的工具会冻结同名的我们
+name = "meshsexcel"
 path = "src/main.rs"
 
 [dependencies]

@@ -33,10 +33,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo build --release
-        run: cargo build --release -p meshsexcel-node -p meshsexcel-poc-b
+        run: cargo build --release -p meshsexcel -p meshsexcel-poc-b
       - name: 冒烟(meshsexcel-node 能启动并响应)
         run: |
-          Start-Process -FilePath "target\release\meshsexcel-node.exe" -ArgumentList "--node-id","ci","--db-dir","$env:TEMP\mesh-ci","--http-port","18443","--p2p-port","22001"
+          Start-Process -FilePath "target\release\meshsexcel.exe" -ArgumentList "--node-id","ci","--db-dir","$env:TEMP\mesh-ci","--http-port","18443","--p2p-port","22001"
           Start-Sleep -Seconds 5
           $info = Invoke-RestMethod -Uri "http://localhost:18443/v1/node/info"
           Write-Output "node info: $($info | ConvertTo-Json -Compress)"
@@ -46,6 +46,6 @@ jobs:
         with:
           name: meshsexcel-windows
           path: |
-            target/release/meshsexcel-node.exe
+            target/release/meshsexcel.exe
             target/release/meshsexcel-poc-b.exe
           retention-days: 14

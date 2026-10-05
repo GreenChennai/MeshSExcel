@@ -41,6 +41,21 @@ Web 端表格组件采用开源的 **Luckysheet**(MIT)——完整办公级交�
 
 ## 运行
 
+### 本地桌面端(Windows,推荐体验)
+
+安装 [LibreOffice](https://www.libreoffice.org/) 后,桌面端即完整的 **LibreOffice Calc**:
+原生公式引擎、全套办公交互,MeshSExcel 在其下做协同与审计:
+
+```cmd
+meshsexcel --node-id alice --db-dir ./data/alice
+office-bridge\start-bridge.cmd
+```
+
+弹出的 Calc 窗口像平常一样编辑,每次变更自动签名上链并同步;其他节点的
+修改实时回显。详见 `office-bridge/README.md`。
+
+### Web 端(局域网任意浏览器)
+
 ```bash
 # 节点 A(本机)
 cargo run -p meshsexcel-node -- --node-id alice --db-dir ./data/alice --http-port 8443 --p2p-port 20001
@@ -49,12 +64,8 @@ cargo run -p meshsexcel-node -- --node-id alice --db-dir ./data/alice --http-por
 cargo run -p meshsexcel-node -- --node-id bob --db-dir ./data/bob --http-port 8444 --p2p-port 20002
 ```
 
-浏览器打开 `http://localhost:8443`:
-
-1. 「新建文档」建一张表;编辑单元格、输入 `=SUM(A1:A9)` 等公式,自动保存并上链
-2. 第二个节点启动后自动互发现(右上角「节点」面板可见),文档与变更自动同步
-3. 「审计历史」查看 block 链(作者 / 时间 / 操作摘要 / hash)
-4. 「快照」可备份整簿并随时恢复;「导入/导出」支持 XLSX 与 CSV
+浏览器打开 `http://localhost:8443`:新建文档、编辑公式自动上链;多节点自动
+互发现同步;审计历史 / 快照 / XLSX / CSV 导入导出。
 
 PoC B(纯网络演示,无 UI):
 
@@ -72,14 +83,14 @@ ops 批量提交、快照、导入),详见 `spec/README.md`。
 ```bash
 cargo test --workspace      # 单元 + API 集成测试
 cargo clippy --all-targets -- -D warnings
-cargo build --release       # 产物:target/release/meshsexcel-node.exe
+cargo build --release       # 产物:target/release/meshsexcel.exe
 ```
 
 ## GitHub 构建(CI / 发布)
 
 - **CI**(`.github/workflows/ci.yml`):每次 push / PR 自动跑
   fmt + clippy + 全量测试(ubuntu),并在 Windows 上构建 +
-  启动冒烟,产物(`meshsexcel-node.exe` / `meshsexcel-poc-b.exe`)
+  启动冒烟,产物(`meshsexcel.exe` / `meshsexcel-poc-b.exe`)
   上传为 Actions Artifacts。
 - **发布**(`.github/workflows/release.yml`):推送 `v*` 标签触发,
   Windows release 构建 + 冒烟 + 打包 zip,自动创建 GitHub Release。

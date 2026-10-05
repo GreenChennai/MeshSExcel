@@ -18,10 +18,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo build --release
-        run: cargo build --release -p meshsexcel-node -p meshsexcel-poc-b
+        run: cargo build --release -p meshsexcel -p meshsexcel-poc-b
       - name: 冒烟
         run: |
-          Start-Process -FilePath "target\release\meshsexcel-node.exe" -ArgumentList "--node-id","ci","--db-dir","$env:TEMP\mesh-rel","--http-port","18443","--p2p-port","22001"
+          Start-Process -FilePath "target\release\meshsexcel.exe" -ArgumentList "--node-id","ci","--db-dir","$env:TEMP\mesh-rel","--http-port","18443","--p2p-port","22001"
           Start-Sleep -Seconds 5
           $info = Invoke-RestMethod -Uri "http://localhost:18443/v1/node/info"
           if ($info.node_id -ne "ci") { throw "node did not boot correctly" }
@@ -29,7 +29,7 @@ jobs:
       - name: 打包
         run: |
           New-Item -ItemType Directory -Path "pkg" -Force | Out-Null
-          Copy-Item "target\release\meshsexcel-node.exe" "pkg\"
+          Copy-Item "target\release\meshsexcel.exe" "pkg\"
           Copy-Item "target\release\meshsexcel-poc-b.exe" "pkg\"
           Copy-Item "README.md" "pkg\"
           Copy-Item "LICENSE" "pkg\"
