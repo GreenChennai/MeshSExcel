@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "meshsexcel-node",
+    name = "meshsexcel",
     version,
     about = "MeshSExcel 局域网协同表格节点"
 )]
